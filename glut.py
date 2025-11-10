@@ -1,3 +1,4 @@
+import os
 import gradio as gr
 import base64
 import requests
@@ -6,6 +7,9 @@ import json
 import random
 from io import BytesIO
 import argparse
+from openai import OpenAI
+from pathlib import Path
+from datetime import datetime
 
 parser = argparse.ArgumentParser() 
 parser.add_argument("--server_name", type=str, default="127.0.0.1", help="IP地址，局域网访问改为0.0.0.0")
@@ -14,17 +18,36 @@ parser.add_argument("--share", action="store_true", help="是否启用gradio共�
 parser.add_argument("--mcp_server", action="store_true", help="是否启用mcp服务")
 args = parser.parse_args()
 
+os.makedirs("outputs", exist_ok=True)
+
+
 BASE_URL = "https://api.modelverse.cn/v1"
 
 MODEL_CHOICES = [
     "openai/sora-2/image-to-video-pro",
-    "openai/sora-2/image-to-video", 
-    "openai/sora-2/text-to-video-pro", 
+    "openai/sora-2/image-to-video",
+    "openai/sora-2/text-to-video-pro",
     "openai/sora-2/text-to-video",
     "Wan-AI/Wan2.2-I2V",
     "Wan-AI/Wan2.2-T2V",
     "Wan-AI/Wan2.5-I2V",
     "Wan-AI/Wan2.5-T2V"
+]
+
+TTS_MODEL_CHOICES = [
+    "IndexTeam/IndexTTS-2"
+]
+
+TTS_VOICE_CHOICES = [
+    "jack_cheng",
+    "sales_voice",
+    "crystla_liu",
+    "stephen_chow",
+    "xiaoyueyue",
+    "mkas",
+    "entertain",
+    "novel",
+    "movie"
 ]
 
 
@@ -282,6 +305,57 @@ def download_video(url, filename):
         raise Exception(f"❌ 视频下载失败: {response.status_code}")
 
 
+def generate_speech(api_key, model, text, voice):
+    """
+    生成语音 - 使用 OpenAI SDK 调用 Modelverse TTS API
+    """
+    try:
+        # 创建 OpenAI 客户端
+        client = OpenAI(
+            api_key=api_key,
+            base_url="https://api.modelverse.cn/v1/",
+        )
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        
+        # 生成语音文件路径
+        speech_file_path = Path(__file__).parent / f"outputs/{timestamp}_{voice}.wav"
+        
+        # 调用 TTS API
+        with client.audio.speech.with_streaming_response.create(
+            model=model,
+            voice=voice,
+            input=text,
+        ) as response:
+            response.stream_to_file(speech_file_path)
+        
+        return str(speech_file_path)
+        
+    except Exception as e:
+        raise Exception(f"❌ 语音生成失败: {str(e)}")
+
+
+def generate_audio(api_key, model, text, voice):
+    """
+    主函数：生成语音
+    """
+    try:
+        # 检查输入参数
+        if not api_key:
+            return "❌ 请输入API KEY", None
+        if not text:
+            return "❌ 请输入要转换的文本", None
+        if len(text) > 600:
+            return "❌ 文本长度不能超过600字符", None
+        
+        # 使用 OpenAI SDK 生成语音，返回文件路径
+        audio_file_path = generate_speech(api_key, model, text, voice)
+        
+        return f"✅ 语音生成完毕", audio_file_path
+        
+    except Exception as e:
+        return f"❌ 发生错误: {str(e)}", None
+
+
 def generate_video(api_key, first_frame_image, last_frame_image, prompt, size, duration, model, negative_prompt=None, seed=None, enable_prompt_expansion=False, audio_url=None, video_state=None):
     """
     主函数：上传图片，提交任务，轮询状态并下载结果
@@ -423,10 +497,10 @@ def update_seed_visibility(model):
     return gr.update(visible=model.startswith("Wan-AI"))
 
 
-with gr.Blocks(title="优云智算 视频生成在线体验", theme=gr.themes.Soft(font=[gr.themes.GoogleFont("IBM Plex Sans")])) as demo:
+with gr.Blocks(title="优云智算 API调用 在线体验", theme=gr.themes.Soft(font=[gr.themes.GoogleFont("IBM Plex Sans")])) as demo:
     gr.Markdown("""
             <div>
-                <h2 style="font-size: 30px;text-align: center;">优云智算 视频生成在线体验</h2>
+                <h2 style="font-size: 30px;text-align: center;">优云智算 API调用 在线体验</h2>
             </div>
             <div style="text-align: center;">
                 使用说明：体验前请先前往 <b><a href="https://www.compshare.cn/?ytag=GPU_YY-SZY_Gradio">优云智算</a></b> 平台注册实名，新用户立得10元赠金。
@@ -438,48 +512,71 @@ with gr.Blocks(title="优云智算 视频生成在线体验", theme=gr.themes.So
     
     # 创建状态变量来存储已生成的视频
     video_state = gr.State([])
-    
-    with gr.Row():
-        with gr.Column():
-            api_key_input = gr.Textbox(
-                label="API KEY",
+    api_key_input = gr.Textbox(
+                label="API KEY（必填）",
                 info="(请先去 [优云智算](https://console.compshare.cn/light-gpu/api-keys?ytag=GPU_YY-SZY_Gradio) 创建API KEY)",
                 placeholder="请输入您的API KEY...",
                 type="password"
             )
-            model_choice = gr.Dropdown(
-                choices=MODEL_CHOICES,
-                value="openai/sora-2/image-to-video",
-                label="选择模型"
-            )
+    with gr.Tabs():
+        with gr.TabItem("视频生成"):
             with gr.Row():
-                first_frame = gr.Image(type="pil", label="首帧图片", visible=True, height=300)
-                last_frame = gr.Image(type="pil", label="尾帧图片（可选）", visible=False, height=300)
-            prompt = gr.Textbox(label="提示词", placeholder="请输入提示词指导视频生成...")
-            negative_prompt = gr.Textbox(label="负面提示词（可选）", placeholder="请输入不希望出现的内容...", visible=False)
-            audio_url = gr.Textbox(label="音频 URL（可选）", placeholder="请输入音频文件 URL（可选）...", visible=False)
-            size = gr.Dropdown(
-                choices=["720x1280", "1280x720", "1024x1792", "1792x1024"],
-                value="720x1280",
-                label="视频尺寸"
-            )
-            duration = gr.Slider(
-                minimum=4,
-                maximum=12,
-                step=1,
-                value=4,
-                label="视频时长 (秒)"
-            )
-            seed = gr.Number(label="种子", value=-1, info="-1表示随机", visible=False)
-            enable_prompt_expansion = gr.Checkbox(label="启用提示词优化", visible=False)
-            submit_btn = gr.Button("🎬 开始生成", variant="primary")
+                with gr.Column():
+                    model_choice = gr.Dropdown(
+                        choices=MODEL_CHOICES,
+                        value="openai/sora-2/image-to-video",
+                        label="选择模型"
+                    )
+                    with gr.Row():
+                        first_frame = gr.Image(type="pil", label="首帧图片", visible=True, height=300)
+                        last_frame = gr.Image(type="pil", label="尾帧图片（可选）", visible=False, height=300)
+                    prompt = gr.Textbox(label="提示词", placeholder="请输入提示词指导视频生成...")
+                    negative_prompt = gr.Textbox(label="负面提示词（可选）", placeholder="请输入不希望出现的内容...", visible=False)
+                    audio_url = gr.Textbox(label="音频 URL（可选）", placeholder="请输入音频文件 URL（可选）...", visible=False)
+                    size = gr.Dropdown(
+                        choices=["720x1280", "1280x720", "1024x1792", "1792x1024"],
+                        value="720x1280",
+                        label="视频尺寸"
+                    )
+                    duration = gr.Slider(
+                        minimum=4,
+                        maximum=12,
+                        step=1,
+                        value=4,
+                        label="视频时长 (秒)"
+                    )
+                    seed = gr.Number(label="种子", value=-1, info="-1表示随机", visible=False)
+                    enable_prompt_expansion = gr.Checkbox(label="启用提示词优化", visible=False)
+                    submit_btn = gr.Button("🎬 开始生成", variant="primary")
+                with gr.Column():
+                    status_output = gr.Textbox(label="任务状态", interactive=False)
+                    gr.Markdown("视频生成后，请点击下载按钮手动保存。刷新界面会导致视频生成结果丢失。")
+                    video_output = gr.Gallery(label="视频生成", columns=2, height=800, object_fit="contain")
+                    gr.Markdown("更多使用方法详见[API调用文档](https://www.compshare.cn/docs/modelverse/models/audio_api/ttts/?ytag=GPU_YY-SZY_Gradio)")
         
-        with gr.Column():
-            status_output = gr.Textbox(label="任务状态", interactive=False)
-            gr.Markdown("视频生成后，请点击下载按钮手动保存。刷新界面会导致视频生成结果丢失。")
-            video_output = gr.Gallery(label="视频生成", columns=2, height=800, object_fit="contain")
-            gr.Markdown("更多使用方法详见[API调用文档](https://www.compshare.cn/docs/modelverse/models/video_api/OpenAI-Sora2-I2V/?ytag=GPU_YY-SZY_Gradio)")
-    
+        with gr.TabItem("音频生成"):
+            with gr.Row():
+                with gr.Column():
+                    tts_model_choice = gr.Dropdown(
+                        choices=TTS_MODEL_CHOICES,
+                        value="IndexTeam/IndexTTS-2",
+                        label="选择语音模型"
+                    )
+                    voice_choice = gr.Dropdown(
+                        choices=TTS_VOICE_CHOICES,
+                        value="jack_cheng",
+                        label="选择音色"
+                    )
+                    text_input = gr.Textbox(
+                        label="输入文本",
+                        placeholder="请输入要转换为语音的文本内容（最大支持600字符）...",
+                    )
+                    submit_audio_btn = gr.Button("🎵 生成语音", variant="primary")
+                with gr.Column():
+                    audio_status_output = gr.Textbox(label="生成状态", interactive=False)
+                    audio_output = gr.Audio(label="生成的语音", type="filepath", interactive=False, autoplay=True, show_download_button=True)
+                    gr.Markdown("更多使用方法详见[API调用文档](https://www.compshare.cn/docs/modelverse/models/audio_api/ttts/?ytag=GPU_YY-SZY_Gradio)")
+
     model_choice.change(
         fn=lambda model: [
             update_visibility(model)[0],
@@ -496,19 +593,28 @@ with gr.Blocks(title="优云智算 视频生成在线体验", theme=gr.themes.So
         outputs=[first_frame, prompt, last_frame, negative_prompt, size, duration, seed, enable_prompt_expansion, audio_url]
     )
 
+    # 视频生成事件处理
     gr.on(
         triggers=[submit_btn.click, prompt.submit],
         fn=generate_video,
         inputs=[api_key_input, first_frame, last_frame, prompt, size, duration, model_choice, negative_prompt, seed, enable_prompt_expansion, audio_url, video_state],
         outputs=[status_output, video_output, video_state]
     )
+    
+    # 音频生成事件处理
+    gr.on(
+        triggers=[submit_audio_btn.click, text_input.submit],
+        fn=generate_audio,
+        inputs=[api_key_input, tts_model_choice, text_input, voice_choice],
+        outputs=[audio_status_output, audio_output]
+    )
 
 
 if __name__ == "__main__":
     demo.launch(
-        server_name=args.server_name, 
+        server_name=args.server_name,
         server_port=args.server_port,
-        share=args.share, 
+        share=args.share,
         mcp_server=args.mcp_server,
         inbrowser=True,
     )
